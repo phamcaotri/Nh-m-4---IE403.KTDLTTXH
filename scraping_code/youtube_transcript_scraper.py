@@ -299,25 +299,25 @@ class TranscriptScraper:
         self.request_count = 0
         logger.info("Recreated YouTubeTranscriptApi instance to reset session")
     
-    def get_transcript(self, video_id, get_generated=True):
+    def get_transcript(self, video_id, get_generated=True, accepted_language_codes=None):
         """
         Get auto-generated transcript for a video with proper error handling and rate limiting.
-        Only retrieves auto-generated transcripts.
-        
+
         Args:
             video_id: YouTube video ID
             get_generated: If True, get auto-generated transcript, otherwise get manually created transcript
+            accepted_language_codes: List of language codes to accept. If None, uses default LANGUAGES list.
         Returns:
             dict: Transcript data or error information
         """
         # Check rate limit
         self._wait_for_rate_limit()
-        
+
         # Increment request counter and recreate API if needed
         self.request_count += 1
         if self.request_count >= 1000:
             self._recreate_api()
-        
+
         result = {
             'video_id': video_id,
             'timestamp': datetime.now().isoformat(),
@@ -326,21 +326,24 @@ class TranscriptScraper:
             'error_message': None,
             'transcripts': []
         }
-        
+
+        # Use provided language codes or default to LANGUAGES
+        language_codes = accepted_language_codes if accepted_language_codes else LANGUAGES
+
         try:
             if get_generated:
                 # Try to get transcript directly
-                transcript = self.ytt_api.list(video_id).find_generated_transcript(LANGUAGES)
+                transcript = self.ytt_api.list(video_id).find_generated_transcript(language_codes)
             else:
                 # Try to get transcript directly
-                transcript = self.ytt_api.list(video_id).find_manually_created_transcript(LANGUAGES)
+                transcript = self.ytt_api.list(video_id).find_manually_created_transcript(language_codes)
             language = transcript.language
             language_code = transcript.language_code
             transcript = transcript.fetch(video_id)
             if transcript:
                 # Convert transcript data to JSON serializable format
                 serializable_data = self._ensure_json_serializable(transcript)
-                
+
                 # Since we're getting directly, we don't know if it's auto-generated
                 # We'll assume it's in the default language (usually the video's language)
                 result['transcripts'].append({
@@ -349,31 +352,31 @@ class TranscriptScraper:
                     'is_generated': get_generated,
                     'data': serializable_data
                 })
-                
+
                 result['status'] = 'success'
             else:
                 result['status'] = 'error'
                 result['error_type'] = 'no_transcript_found'
                 result['error_message'] = 'No transcript could be fetched'
-                
+
         except RequestBlocked as e:
             result['error_type'] = 'request_blocked'
             result['error_message'] = str(e)
-            
+
         except VideoUnavailable as e:
             result['error_type'] = 'video_unavailable'
             result['error_message'] = str(e)
-            
+
         except TranscriptsDisabled as e:
             if get_generated:
-                return self.get_transcript(video_id, get_generated=False)
+                return self.get_transcript(video_id, get_generated=False, accepted_language_codes=accepted_language_codes)
             else:
                 result['error_type'] = 'transcripts_disabled'
                 result['error_message'] = str(e)
-            
+
         except NoTranscriptFound as e:
             if get_generated:
-                return self.get_transcript(video_id, get_generated=False)
+                return self.get_transcript(video_id, get_generated=False, accepted_language_codes=accepted_language_codes)
             else:
                 result['error_type'] = 'no_transcript_found'
                 result['error_message'] = str(e)
@@ -384,7 +387,7 @@ class TranscriptScraper:
         except VideoUnplayable as e:
             result['error_type'] = 'video_unplayable'
             result['error_message'] = str(e)
-        
+
         except JSONDecodeError as e:
             result['error_type'] = 'json_decode_error'
             result['error_message'] = f"JSONDecodeError: {str(e)}"
@@ -393,7 +396,7 @@ class TranscriptScraper:
         except Exception as e:
             result['error_type'] = 'other'
             result['error_message'] = f"{type(e).__name__}: {str(e)}"
-            
+
         return result
     
     def _update_stats(self, result):
@@ -537,13 +540,14 @@ class TranscriptScraper:
         latest_checkpoint = max(checkpoint_files, key=os.path.getmtime)
         return latest_checkpoint
     
-    def process_video_batch(self, video_ids, resume=True):
+    def process_video_batch(self, video_ids, resume=True, accepted_language_codes=None):
         """
         Process a batch of video IDs, with option to resume from checkpoint.
         
         Args:
             video_ids: List of video IDs to process
             resume: If True, try to resume from the latest checkpoint
+            accepted_language_codes: List of language codes to accept. If None, uses default LANGUAGES list.
             
         Returns:
             set: Set of processed video IDs
@@ -560,13 +564,15 @@ class TranscriptScraper:
         video_ids_to_process = [vid for vid in video_ids if vid not in processed_ids]
         
         logger.info(f"Starting processing of {len(video_ids_to_process)} videos")
+        if accepted_language_codes:
+            logger.info(f"Filtering for languages: {', '.join(accepted_language_codes)}")
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = []
             
-            # Submit all tasks
+            # Submit all tasks with the accepted language codes
             for video_id in video_ids_to_process:
-                futures.append(executor.submit(self.get_transcript, video_id))
+                futures.append(executor.submit(self.get_transcript, video_id, True, accepted_language_codes))
             
             # Process results as they complete
             pbar = tqdm(total=len(futures), desc="Processing videos")
